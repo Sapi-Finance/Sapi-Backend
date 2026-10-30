@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
@@ -32,13 +32,8 @@ app.add_middleware(
 )
 
 
-@app.get(
-    "/health",
-    summary="Check API health",
-    description="Return the service status and configured Stellar network.",
-)
+@app.get("/health")
 def health_check():
-    """Return a basic service health response."""
     return {"status": "healthy", "service": "sapi-backend", "stellar_network": "testnet"}
 
 
@@ -48,10 +43,18 @@ def health_check():
     response_model=Client,
     status_code=201,
     summary="Create a client",
-    description="Create a client record. The name must not be empty; example values are shown in the request schema.",
+    description="Create a client record. The name must not be empty.",
 )
 def create_client(
-    client: Client,
+    client: Client = Body(
+        ...,
+        openapi_examples={
+            "new_client": {
+                "summary": "Create a client",
+                "value": {"name": "Ada Lovelace", "email": "ada@example.com"},
+            }
+        },
+    ),
     owner_email: Optional[str] = Query(
         default=None,
         description="Optional account email to associate with this client.",
@@ -71,20 +74,12 @@ def create_client(
     return client
 
 
-@app.get(
-    "/clients",
-    summary="List clients with invoice statistics",
-    description="Return clients for an optional account email, including billed, outstanding, and invoice-count totals.",
-)
+@app.get("/clients")
 def list_clients_with_stats(
-    owner_email: Optional[str] = Query(
-        default=None,
-        description="Limit results to this account email.",
-        examples=["freelancer@example.com"],
-    ),
+    owner_email: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    """Return clients with their computed totals and invoice count."""
+    """Returns all clients along with their computed Total Billed, Outstanding, and Invoice count for the Clients screen."""
     client_query = select(Client)
     invoice_query = select(Invoice)
     if owner_email:
@@ -122,10 +117,24 @@ def list_clients_with_stats(
     response_model=Invoice,
     status_code=201,
     summary="Create an invoice",
-    description="Create an invoice. Its amount must be greater than zero, invoice number cannot be empty, and status must be supported.",
+    description="Create an invoice with a positive amount, a nonempty invoice number, and a supported status.",
 )
 def create_invoice(
-    invoice: Invoice,
+    invoice: Invoice = Body(
+        ...,
+        openapi_examples={
+            "new_invoice": {
+                "summary": "Create an invoice",
+                "value": {
+                    "invoice_number": "SAPI-INV-0001",
+                    "client_name": "Ada Lovelace",
+                    "amount": 50000,
+                    "currency": "NGN",
+                    "status": "Unpaid",
+                },
+            }
+        },
+    ),
     owner_email: Optional[str] = Query(
         default=None,
         description="Optional account email to associate with this invoice.",
@@ -150,35 +159,19 @@ def create_invoice(
     return invoice
 
 
-@app.get(
-    "/invoices",
-    response_model=List[Invoice],
-    summary="List invoices",
-    description="Return invoices, optionally limited to one account email.",
-)
+@app.get("/invoices", response_model=List[Invoice])
 def list_invoices(
-    owner_email: Optional[str] = Query(
-        default=None,
-        description="Limit results to this account email.",
-        examples=["freelancer@example.com"],
-    ),
+    owner_email: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    """List invoices in descending creation order."""
     query = select(Invoice)
     if owner_email:
         query = query.where(Invoice.owner_email == owner_email)
     return session.exec(query.order_by(Invoice.id.desc())).all()
 
 
-@app.get(
-    "/invoices/{invoice_id}",
-    response_model=Invoice,
-    summary="Get an invoice",
-    description="Return one invoice by its database ID.",
-)
+@app.get("/invoices/{invoice_id}", response_model=Invoice)
 def get_single_invoice(invoice_id: int, session: Session = Depends(get_session)):
-    """Fetch a single invoice or return 404 when it does not exist."""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -189,7 +182,7 @@ def get_single_invoice(invoice_id: int, session: Session = Depends(get_session))
     "/invoices/{invoice_id}/status",
     response_model=Invoice,
     summary="Update invoice status",
-    description="Set an invoice status to one of Paid, Unpaid, Overdue, Draft, or Pending. Unsupported values return HTTP 422.",
+    description="Set an invoice to Paid, Unpaid, Overdue, Draft, or Pending. Unsupported values return HTTP 422.",
 )
 def update_invoice_status(
     invoice_id: int,
@@ -211,25 +204,14 @@ def update_invoice_status(
     return invoice
 
 
-@app.post(
-    "/invoices/{invoice_id}/verify-stellar",
-    summary="Verify Stellar payment",
-    description="Verify a payment through the Horizon API or record a direct Freighter testnet transaction hash.",
-)
+@app.post("/invoices/{invoice_id}/verify-stellar")
 def verify_stellar_payment(
     invoice_id: int,
-    freelancer_wallet: str = Query(
-        ...,
-        description="Freelancer's Stellar wallet address used for Horizon verification.",
-        examples=["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"],
-    ),
-    tx_hash: str = Query(
-        default="",
-        description="Optional transaction hash returned by a direct Freighter payment.",
-    ),
+    freelancer_wallet: str,
+    tx_hash: str = "",
     session: Session = Depends(get_session),
 ):
-    """Verify Stellar payment or record a provided transaction hash."""
+    """Verifies Stellar payment via Horizon API or records direct Freighter Testnet payment."""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
@@ -257,20 +239,11 @@ def verify_stellar_payment(
 
 
 # --- DASHBOARD SUMMARY ---
-@app.get(
-    "/dashboard/summary",
-    summary="Get dashboard totals",
-    description="Return invoice and client totals for an optional account email.",
-)
+@app.get("/dashboard/summary")
 def get_dashboard_summary(
-    owner_email: Optional[str] = Query(
-        default=None,
-        description="Limit totals to this account email.",
-        examples=["freelancer@example.com"],
-    ),
+    owner_email: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    """Calculate dashboard invoice and client totals."""
     invoice_query = select(Invoice)
     client_query = select(Client)
     if owner_email:
