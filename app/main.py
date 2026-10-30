@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 from typing import List, Optional
-from fastapi import Depends, FastAPI, HTTPException
+
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session, select
 
 from app.database import create_db_and_tables, get_session
-from app.models import Client, Invoice
+from app.models import Client, Invoice, InvoiceStatus
 from app.stellar_service import verify_invoice_payment_on_stellar
 
 
@@ -37,12 +38,31 @@ def health_check():
 
 
 # --- CLIENT ENDPOINTS ---
-@app.post("/clients", response_model=Client)
+@app.post(
+    "/clients",
+    response_model=Client,
+    status_code=201,
+    summary="Create a client",
+    description="Create a client record. The name must not be empty.",
+)
 def create_client(
-    client: Client,
-    owner_email: Optional[str] = None,
+    client: Client = Body(
+        ...,
+        openapi_examples={
+            "new_client": {
+                "summary": "Create a client",
+                "value": {"name": "Ada Lovelace", "email": "ada@example.com"},
+            }
+        },
+    ),
+    owner_email: Optional[str] = Query(
+        default=None,
+        description="Optional account email to associate with this client.",
+        examples=["freelancer@example.com"],
+    ),
     session: Session = Depends(get_session),
 ):
+    """Create and return a client record."""
     if owner_email and (not client.owner_email or client.owner_email == "default@sapi.com"):
         client.owner_email = owner_email
     if not client.owner_email:
@@ -92,12 +112,37 @@ def list_clients_with_stats(
 
 
 # --- INVOICE ENDPOINTS ---
-@app.post("/invoices", response_model=Invoice)
+@app.post(
+    "/invoices",
+    response_model=Invoice,
+    status_code=201,
+    summary="Create an invoice",
+    description="Create an invoice with a positive amount, a nonempty invoice number, and a supported status.",
+)
 def create_invoice(
-    invoice: Invoice,
-    owner_email: Optional[str] = None,
+    invoice: Invoice = Body(
+        ...,
+        openapi_examples={
+            "new_invoice": {
+                "summary": "Create an invoice",
+                "value": {
+                    "invoice_number": "SAPI-INV-0001",
+                    "client_name": "Ada Lovelace",
+                    "amount": 50000,
+                    "currency": "NGN",
+                    "status": "Unpaid",
+                },
+            }
+        },
+    ),
+    owner_email: Optional[str] = Query(
+        default=None,
+        description="Optional account email to associate with this invoice.",
+        examples=["freelancer@example.com"],
+    ),
     session: Session = Depends(get_session),
 ):
+    """Create and return an invoice with a generated Stellar memo when omitted."""
     if owner_email and (not invoice.owner_email or invoice.owner_email == "default@sapi.com"):
         invoice.owner_email = owner_email
     if not invoice.owner_email:
@@ -133,12 +178,26 @@ def get_single_invoice(invoice_id: int, session: Session = Depends(get_session))
     return invoice
 
 
-@app.patch("/invoices/{invoice_id}/status", response_model=Invoice)
-def update_invoice_status(invoice_id: int, status: str, session: Session = Depends(get_session)):
+@app.patch(
+    "/invoices/{invoice_id}/status",
+    response_model=Invoice,
+    summary="Update invoice status",
+    description="Set an invoice to Paid, Unpaid, Overdue, Draft, or Pending. Unsupported values return HTTP 422.",
+)
+def update_invoice_status(
+    invoice_id: int,
+    status: InvoiceStatus = Query(
+        ...,
+        description="Allowed values: Paid, Unpaid, Overdue, Draft, Pending.",
+        examples=[InvoiceStatus.UNPAID.value],
+    ),
+    session: Session = Depends(get_session),
+):
+    """Update an invoice status while retaining its existing string storage format."""
     invoice = session.get(Invoice, invoice_id)
     if not invoice:
         raise HTTPException(status_code=404, detail="Invoice not found")
-    invoice.status = status
+    invoice.status = status.value
     session.add(invoice)
     session.commit()
     session.refresh(invoice)
@@ -179,7 +238,7 @@ def verify_stellar_payment(
     return {"verified": result.get("verified", False), "invoice": invoice, "stellar_verification": result}
 
 
-# --- DASHBOARD SUMMARY ENDPOINT ---
+# --- DASHBOARD SUMMARY ---
 @app.get("/dashboard/summary")
 def get_dashboard_summary(
     owner_email: Optional[str] = None,
