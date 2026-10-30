@@ -66,6 +66,9 @@ class Invoice(SQLModel, table=True):
     status: str = Field(
         default=InvoiceStatus.UNPAID.value,
         description="One of the supported invoice statuses.",
+        json_schema_extra={
+            "enum": [status.value for status in InvoiceStatus],
+        },
         examples=[InvoiceStatus.UNPAID.value],
     )
     line_items_json: str = Field(default="[]")  # JSON string storing [{description, subtitle, qty, rate, amount}]
